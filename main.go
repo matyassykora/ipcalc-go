@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"flag"
 	"fmt"
 	"math"
 	"math/bits"
@@ -114,17 +115,51 @@ func NewNetworkFromInt(address, mask uint32) *Network {
 	}
 }
 
-func PrintNetwork(network *Network, printDescription bool, extended bool) {
+func PrintNetwork(network *Network, printDescription, extended, printClass bool) {
 	if printDescription {
 		network.address.Print(extended)
 		network.mask.Print(extended)
 		fmt.Printf("CIDR Prefix:\t/%d\n", bits.OnesCount(uint(network.mask.UInt32())))
 	}
 	network.network.Print(extended)
+	if printClass {
+		fmt.Printf("CLASS %s\n", GetClass(network.address))
+	}
 	network.hostMin.Print(extended)
 	network.hostMax.Print(extended)
 	network.broadcast.Print(extended)
 	fmt.Printf("Hosts/Net:\t%d\n", network.hostsPerNet.UInt32())
+}
+
+func GetClass(address IPv4Type) string {
+	ip := address.Bits()[:8]
+	res, err := strconv.ParseUint(ip, 2, 0)
+
+	if err != nil {
+		return "ERROR"
+	}
+
+	if res >= 0 && res <= 127 {
+		return "A"
+	}
+
+	if res >= 128 && res <= 191 {
+		return "B"
+	}
+
+	if res >= 192 && res <= 223 {
+		return "C"
+	}
+
+	if res >= 224 && res <= 239 {
+		return "D"
+	}
+
+	if res >= 240 && res <= 255 {
+		return "E"
+	}
+
+	return "ERROR"
 }
 
 func Subnets(address, mask, subnetMask string) ([]Network, error) {
@@ -193,14 +228,16 @@ func IPToInt(thing string) (uint32, error) {
 }
 
 func main() {
-	args := os.Args[1:]
+	printExtended := flag.Bool("e", false, "Display extended output")
+	printClass := flag.Bool("c", false, "Display network class")
+	flag.Parse()
+
+	args := flag.Args()
 	argCount := len(args)
 	if argCount < 2 || argCount > 3 {
 		fmt.Println("Wrong number of input arguments")
 		os.Exit(1)
 	}
-
-	extended := true
 
 	if argCount == 2 {
 		network, err := NewNetwork(args[0], args[1])
@@ -208,7 +245,7 @@ func main() {
 			fmt.Println("Error when adding network")
 			os.Exit(1)
 		}
-		PrintNetwork(network, true, extended)
+		PrintNetwork(network, true, *printExtended, *printClass)
 	}
 
 	if argCount == 3 {
@@ -223,7 +260,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		PrintNetwork(network, true, extended)
+		PrintNetwork(network, true, *printExtended, *printClass)
 		fmt.Println("")
 
 		fmt.Printf("Subnets after transition from %s to %s\n\n", args[1], args[2])
@@ -233,7 +270,7 @@ func main() {
 		for i, subnet := range subnets {
 			fmt.Printf("\n")
 			fmt.Printf("%d.\n", i+1)
-			PrintNetwork(&subnet, false, extended)
+			PrintNetwork(&subnet, false, *printExtended, *printClass)
 		}
 	}
 }
