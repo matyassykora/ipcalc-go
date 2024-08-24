@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/bits"
 	"os"
@@ -12,90 +13,129 @@ import (
 	"strings"
 )
 
+const (
+	ErrOutOfRange     = IPv4Error("Error: Value is out of range")
+	ErrInvalidSyntax  = IPv4Error("Error: Value has invalid syntax")
+	ErrPrefixTooSmall = IPv4Error("Subnet prefix must be larger than the prefix")
+	ErrMaskParse      = IPv4Error("Error when parsing mask")
+)
+
+type IPv4Error string
+
+func (e IPv4Error) Error() string {
+	return string(e)
+}
+
+func convertStrconvError(err error) error {
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return ErrOutOfRange
+
+	case errors.Is(err, strconv.ErrSyntax):
+		return ErrInvalidSyntax
+
+	default:
+		return err
+	}
+}
+
+func IPv4ToInt(addrString string) (uint32, error) {
+	splitAddr := strings.Split(addrString, ".")
+	bytes := make([]byte, 0, 4)
+
+	for _, octetString := range splitAddr {
+		val, err := strconv.ParseUint(octetString, 10, 0)
+		if val < 0 || val > 255 {
+			return 0, ErrOutOfRange
+		}
+		if err != nil {
+			errCast := err.(*strconv.NumError).Unwrap()
+			err = convertStrconvError(errCast)
+			return 0, err
+		}
+
+		bytes = append(bytes, byte(val))
+	}
+
+	return binary.BigEndian.Uint32(bytes), nil
+}
+
+func GetClass(address IPv4Address) string {
+	ip := address.Bits()[:8]
+	res, err := strconv.ParseUint(ip, 2, 0)
+
+	if err != nil {
+		return "ERROR"
+	}
+
+	switch {
+	case res >= 0 && res <= 127:
+		return "A"
+
+	case res >= 128 && res <= 191:
+		return "B"
+
+	case res >= 192 && res <= 223:
+		return "C"
+
+	case res >= 224 && res <= 239:
+		return "D"
+
+	case res >= 240 && res <= 255:
+		return "E"
+
+	default:
+		return "ERROR"
+	}
+}
+
 type IPv4 interface {
 	String() string
-	UInt32() uint32
 	Dots() string
 	Bits() string
-	Print(extended bool)
+	Print()
 }
 
-type IPv4Type struct {
-	uint32      uint32
-	description string
+type IPv4Address struct {
+	Addr        uint32
+	Description string
 }
 
-func (t *IPv4Type) String() string {
-	return strconv.FormatUint(uint64(t.uint32), 10)
+func (i *IPv4Address) String() string {
+	return fmt.Sprintf("%d", i.Addr)
 }
 
-func (t *IPv4Type) UInt32() uint32 {
-	return uint32(t.uint32)
-}
-
-func (t *IPv4Type) Dots() string {
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, t.UInt32())
+func (i *IPv4Address) Dots() string {
+	bytes := make([]byte, 4, 4)
+	binary.BigEndian.PutUint32(bytes, i.Addr)
 	return fmt.Sprintf("%v.%v.%v.%v", bytes[0], bytes[1], bytes[2], bytes[3])
 }
 
-func (t *IPv4Type) Bits() string {
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, t.UInt32())
+func (i *IPv4Address) Bits() string {
+	bytes := make([]byte, 4, 4)
+	binary.BigEndian.PutUint32(bytes, i.Addr)
 	return fmt.Sprintf("%08b.%08b.%08b.%08b", bytes[0], bytes[1], bytes[2], bytes[3])
 }
 
-func (t *IPv4Type) Print(extended bool) {
+func (i *IPv4Address) Print(writer io.Writer, extended bool) {
 	if extended {
-		fmt.Printf("%s:\t%s\t%s\n", t.description, t.Dots(), t.Bits())
+		fmt.Fprintf(writer, "%s:\t%s\t%s\n", i.Description, i.Dots(), i.Bits())
 		return
 	}
-	fmt.Printf("%s:\t%s\n", t.description, t.Dots())
+	fmt.Fprintf(writer, "%s:\t%s\n", i.Description, i.Dots())
 }
 
 type Network struct {
-	address     IPv4Type
-	mask        IPv4Type
-	network     IPv4Type
-	hostMin     IPv4Type
-	hostMax     IPv4Type
-	broadcast   IPv4Type
-	hostsPerNet IPv4Type
+	address     *IPv4Address
+	mask        *IPv4Address
+	network     *IPv4Address
+	hostMin     *IPv4Address
+	hostMax     *IPv4Address
+	broadcast   *IPv4Address
+	hostsPerNet *IPv4Address
 }
 
-func StringToUInt32(string string) (uint32, error) {
-	num, err := strconv.ParseUint(string, 10, 32)
-	return uint32(num), err
-}
-
-func NewNetwork(address, mask string) (*Network, error) {
-	// split the leading '/'
-	mask = mask[1:]
-	ip_mask, err := StringToUInt32(mask)
-	if err != nil {
-		return nil, err
-	}
-
-	ip_address, err := IPToInt(address)
-	ip_mask = uint32(math.Exp2(32) - math.Exp2(32-float64(ip_mask)))
-	ip_network := ip_address & ip_mask
-	ip_hostMin := ip_network + 1
-	ip_broadcast := ip_network + ^ip_mask
-	ip_hostMax := ip_broadcast - 1
-	ip_hostCount := ip_broadcast - ip_hostMin
-
-	return &Network{
-		address:     IPv4Type{ip_address, "Address"},
-		mask:        IPv4Type{ip_mask, "Netmask"},
-		network:     IPv4Type{ip_network, "Network"},
-		hostMin:     IPv4Type{ip_hostMin, "HostMin"},
-		hostMax:     IPv4Type{ip_hostMax, "HostMax"},
-		broadcast:   IPv4Type{ip_broadcast, "Broadcast"},
-		hostsPerNet: IPv4Type{ip_hostCount, "Hosts/Net"},
-	}, nil
-}
-
-func NewNetworkFromInt(address, mask uint32) *Network {
+func NewNetwork(address, mask uint32) *Network {
 	ip_address := address
 	ip_mask := mask
 	ip_network := ip_address & ip_mask
@@ -105,172 +145,139 @@ func NewNetworkFromInt(address, mask uint32) *Network {
 	ip_hostCount := ip_broadcast - ip_hostMin
 
 	return &Network{
-		address:     IPv4Type{ip_address, "Address"},
-		mask:        IPv4Type{ip_mask, "Netmask"},
-		network:     IPv4Type{ip_network, "Network"},
-		hostMin:     IPv4Type{ip_hostMin, "HostMin"},
-		hostMax:     IPv4Type{ip_hostMax, "HostMax"},
-		broadcast:   IPv4Type{ip_broadcast, "Broadcast"},
-		hostsPerNet: IPv4Type{ip_hostCount, "Hosts/Net"},
+		address:     &IPv4Address{ip_address, "Address"},
+		mask:        &IPv4Address{ip_mask, "Netmask"},
+		network:     &IPv4Address{ip_network, "Network"},
+		hostMin:     &IPv4Address{ip_hostMin, "HostMin"},
+		hostMax:     &IPv4Address{ip_hostMax, "HostMax"},
+		broadcast:   &IPv4Address{ip_broadcast, "Broadcast"},
+		hostsPerNet: &IPv4Address{ip_hostCount, "Hosts/Net"},
 	}
 }
 
-func PrintNetwork(network *Network, printDescription, extended, printClass bool) {
+func (n *Network) Print(writer io.Writer, printDescription, extended, printClass bool) {
 	if printDescription {
-		network.address.Print(extended)
-		network.mask.Print(extended)
-		fmt.Printf("CIDR Prefix:\t/%d\n", bits.OnesCount(uint(network.mask.UInt32())))
+		n.address.Print(writer, extended)
+		n.mask.Print(writer, extended)
+		fmt.Fprintf(writer, "CIDR Prefix:\t/%d\n", bits.OnesCount(uint(n.mask.Addr)))
 	}
-	network.network.Print(extended)
+	n.network.Print(writer, extended)
 	if printClass {
-		fmt.Printf("CLASS %s\n", GetClass(network.address))
+		fmt.Fprintf(writer, "CLASS %s\n", GetClass(*n.address))
 	}
-	network.hostMin.Print(extended)
-	network.hostMax.Print(extended)
-	network.broadcast.Print(extended)
-	fmt.Printf("Hosts/Net:\t%d\n", network.hostsPerNet.UInt32())
+	n.hostMin.Print(writer, extended)
+	n.hostMax.Print(writer, extended)
+	n.broadcast.Print(writer, extended)
+	fmt.Fprintf(writer, "Hosts/Net:\t%d\n", n.hostsPerNet.Addr)
 }
 
-func GetClass(address IPv4Type) string {
-	ip := address.Bits()[:8]
-	res, err := strconv.ParseUint(ip, 2, 0)
-
-	if err != nil {
-		return "ERROR"
+func ParseMask(mask string) (uint32, error) {
+	var prefix uint32
+	if len(mask) <= 1 {
+		return 0, ErrMaskParse
 	}
 
-	if res >= 0 && res <= 127 {
-		return "A"
-	}
+	if mask[0] == '/' {
+		count, err := fmt.Sscanf(mask, "/%d", &prefix)
+		if count != 1 {
+			return 0, ErrMaskParse
+		}
+		if err != nil {
+			return 0, err
+		}
+		return uint32(prefixToMask(prefix)), nil
 
-	if res >= 128 && res <= 191 {
-		return "B"
+	} else {
+		octets := make([]byte, 4)
+		count, err := fmt.Sscanf(mask, "%d.%d.%d.%d", &octets[0], &octets[1], &octets[2], &octets[3])
+		if count != 4 {
+			return 0, ErrMaskParse
+		}
+		if err != nil {
+			return 0, err
+		}
+		return binary.BigEndian.Uint32(octets), nil
 	}
-
-	if res >= 192 && res <= 223 {
-		return "C"
-	}
-
-	if res >= 224 && res <= 239 {
-		return "D"
-	}
-
-	if res >= 240 && res <= 255 {
-		return "E"
-	}
-
-	return "ERROR"
 }
 
-func Subnets(address, mask, subnetMask string) ([]Network, error) {
-	var prefix float64
-	var subnetPrefix float64
+func prefixToMask(prefix uint32) uint32 {
+	return uint32(math.Exp2(32) - math.Exp2(float64(32-prefix)))
+}
 
-	count, err := fmt.Sscanf(mask, "/%f", &prefix)
-	if count != 1 {
-		return nil, errors.New("Error when adding network")
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	count, err = fmt.Sscanf(subnetMask, "/%f", &subnetPrefix)
-	if count != 1 {
-		return nil, errors.New("Error when adding subnet")
-	}
-	if err != nil {
-		return nil, err
-	}
-
+func getSubnetCount(prefix, subnetPrefix int) (int, error) {
 	if prefix >= subnetPrefix {
-		return nil, errors.New("Subnet prefix must be larger than the prefix")
+		return 0, ErrPrefixTooSmall
 	}
 
-	subnetCount := int(math.Exp2(32-prefix) / math.Exp2(32-subnetPrefix))
+	return int(math.Exp2(32-float64(prefix)) / math.Exp2(32-float64(subnetPrefix))), nil
+}
+
+func CreateSubnets(address, mask, subnetMask uint32) ([]Network, error) {
+	subnetCount, err := getSubnetCount(bits.OnesCount32(mask), bits.OnesCount32(subnetMask))
+	if err != nil {
+		return nil, err
+	}
 
 	subnets := make([]Network, subnetCount)
 
 	for i := 0; i < subnetCount; i++ {
-		var ip uint32
-		var err error
-
-		if i == 0 {
-			ip, err = IPToInt(address)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			ip = subnets[i-1].broadcast.uint32 + 1
+		if i != 0 {
+			address = subnets[i-1].broadcast.Addr + 1
 		}
 
-		subnetMaskInt := uint32(math.Exp2(32) - math.Exp2(32-subnetPrefix))
-
-		subnets[i] = *NewNetworkFromInt(ip, subnetMaskInt)
+		subnets[i] = *NewNetwork(address, subnetMask)
 	}
 	return subnets, nil
 }
 
-func IPToInt(thing string) (uint32, error) {
-	str := strings.Split(thing, ".")
-	var bytes []byte
-
-	for _, part := range str {
-		val, err := strconv.ParseInt(part, 10, 0)
-
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		bytes = append(bytes, byte(val))
+func checkError(err error) {
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
-
-	return binary.BigEndian.Uint32(bytes), nil
 }
 
 func main() {
+	extended := true
+
 	printExtended := flag.Bool("e", false, "Display extended output")
 	printClass := flag.Bool("c", false, "Display network class")
 	flag.Parse()
 
 	args := flag.Args()
 	argCount := len(args)
+
 	if argCount < 2 || argCount > 3 {
-		fmt.Println("Wrong number of input arguments")
-		os.Exit(1)
+		checkError(errors.New("Need at least 2 arguments"))
 	}
 
-	if argCount == 2 {
-		network, err := NewNetwork(args[0], args[1])
-		if err != nil {
-			fmt.Println("Error when adding network")
-			os.Exit(1)
-		}
-		PrintNetwork(network, true, *printExtended, *printClass)
-	}
+	address, err := IPv4ToInt(args[0])
+	checkError(err)
+
+	mask, err := ParseMask(args[1])
+	checkError(err)
+
+	network := NewNetwork(address, mask)
+	network.Print(os.Stdout, true, *printExtended, *printClass)
 
 	if argCount == 3 {
-		network, err := NewNetwork(args[0], args[1])
-		if err != nil {
-			fmt.Println("Error when adding subnet")
-			os.Exit(1)
-		}
-		subnets, err := Subnets(args[0], args[1], args[2])
-		if err != nil {
-			fmt.Println(err.Error())
-			os.Exit(1)
-		}
+		subnetMask, err := ParseMask(args[2])
+		checkError(err)
 
-		PrintNetwork(network, true, *printExtended, *printClass)
-		fmt.Println("")
+		subnets, err := CreateSubnets(address, mask, subnetMask)
+		checkError(err)
+
+		fmt.Println()
 
 		fmt.Printf("Subnets after transition from %s to %s\n\n", args[1], args[2])
 		fmt.Printf("Netmask:\t%s\n", subnets[0].mask.Dots())
 		fmt.Printf("CIDR Prefix:\t%s\n", args[2])
 
 		for i, subnet := range subnets {
-			fmt.Printf("\n")
 			fmt.Printf("%d.\n", i+1)
-			PrintNetwork(&subnet, false, *printExtended, *printClass)
+			subnet.Print(os.Stdout, false, extended, false)
+			fmt.Println()
 		}
+
 	}
 }
